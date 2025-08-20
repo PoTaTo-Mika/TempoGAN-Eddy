@@ -6,11 +6,11 @@ import torch.nn.functional as F
 class ResidualBlock(nn.Module):
     def __init__(self, channels):
         super(ResidualBlock, self).__init__()
-        self.conv1 = nn.Conv3d(channels, channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm3d(channels)
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(channels)
         self.prelu = nn.PReLU()
-        self.conv2 = nn.Conv3d(channels, channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm3d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(channels)
 
     def forward(self, x):
         residual = self.conv1(x)
@@ -21,13 +21,13 @@ class ResidualBlock(nn.Module):
 
         return x + residual
     
-class UpsampleBlock3D(nn.Module):
+class UpsampleBlock2d(nn.Module):
     def __init__(self, in_channels, up_scale):
-        super(UpsampleBlock3D, self).__init__()
-        # 步骤1: 使用插值放大特征图的 D, H, W 维度
-        self.upsample = nn.Upsample(scale_factor=up_scale, mode='trilinear', align_corners=False)
-        # 步骤2: 使用3D卷积进一步学习和优化特征
-        self.conv = nn.Conv3d(in_channels, in_channels, kernel_size=3, padding=1)
+        super(UpsampleBlock2d, self).__init__()
+        # 使用插值放大特征图的 H, W 维度
+        self.upsample = nn.Upsample(scale_factor=up_scale, mode='bilinear', align_corners=False)
+        # 使用2d卷积进一步学习和优化特征
+        self.conv = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1)
         self.prelu = nn.PReLU()
 
     def forward(self, x):
@@ -43,19 +43,19 @@ class Generator(nn.Module):
         super(Generator, self).__init__()
         
         # 将输入数据映射到高维特征空间
-        self.head = nn.Sequential(nn.Conv3d(in_channels, 64, kernel_size=5, padding=2), nn.PReLU())
+        self.head = nn.Sequential(nn.Conv2d(in_channels, 64, kernel_size=5, padding=2), nn.PReLU())
 
         # 堆叠多个残差块
         self.body = nn.Sequential(*[ResidualBlock(64) for _ in range(n_residual_blocks)])
         
         # 身体的后处理层，用于与头部进行全局残差连接
-        self.body_post_conv = nn.Sequential(nn.Conv3d(64, 64, kernel_size=3, padding=1), nn.BatchNorm3d(64))
+        self.body_post_conv = nn.Sequential(nn.Conv2d(64, 64, kernel_size=3, padding=1), nn.BatchNorm2d(64))
 
         # 连续进行两次 2x 上采样，最终实现 4x
         self.tail = nn.Sequential(
-            UpsampleBlock3D(64, up_scale=2),
-            UpsampleBlock3D(64, up_scale=2),
-            nn.Conv3d(64, out_channels, kernel_size=5, padding=2),
+            UpsampleBlock2d(64, up_scale=2),
+            UpsampleBlock2d(64, up_scale=2),
+            nn.Conv2d(64, out_channels, kernel_size=5, padding=2),
             nn.Tanh() # 将输出归一化到 [-1, 1] 范围，这在GAN中很常见
         )
 
@@ -82,45 +82,37 @@ class DiscriminatorS(nn.Module):
         input_channels = in_channels * 2
 
         self.features = nn.Sequential(
-            nn.Conv3d(input_channels, 32, kernel_size=4, stride=2, padding=1),
+            nn.Conv2d(input_channels, 32, kernel_size=4, stride=2, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
 
-            nn.Conv3d(32, 64, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm3d(64),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(64),
             nn.LeakyReLU(0.2, inplace=True),
 
-            nn.Conv3d(64, 128, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm3d(128),
+            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2, inplace=True),
 
-            nn.Conv3d(128, 256, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm3d(256),
+            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
-            # size: (256, 4, 4, 4)
+            # size: (256, 4, 4)
         )
 
-        """"
         self.classifier = nn.Sequential(
-            nn.Linear(256 * 4 * 4 * 4, 1024),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(1024, 1),
-            nn.Sigmoid()
-        )
-        """
-        
-        self.classifier = nn.Sequential(
-            nn.Linear(256 * 4 * 4 * 4, 1),
+            nn.Linear(256 * 4 * 4, 1),
             nn.Sigmoid()
         )
 
     def forward(self, high_res_image, low_res_image):
-
+        # 将低分辨率图像上采样到高分辨率图像的尺寸
         upsample_low_resolution = nn.functional.interpolate(
             low_res_image, 
-            size = high_res_image.shape[2:], mode='trilinear', 
+            size=high_res_image.shape[2:], mode='bilinear', 
             align_corners=False
         )
 
+        # 拼接高分辨率和上采样后的低分辨率图像
         combined_input = torch.cat([high_res_image, 
                                     upsample_low_resolution], 
                                    dim=1)
@@ -133,31 +125,27 @@ class DiscriminatorS(nn.Module):
 
 ############## 时间判别器 #############
 def multi_frame_align(frame_previous, frame_next, velocity_previous, velocity_next):
-    
-    device = frame_previous.device
-    N, C, D, H, W = frame_previous.shape
 
-    grid_d, grid_h, grid_w = torch.meshgrid(
-        torch.linspace(-1, 1, D),
+    device = frame_previous.device
+    N, C, H, W = frame_previous.shape
+
+    # 创建2D网格
+    grid_h, grid_w = torch.meshgrid(
         torch.linspace(-1, 1, H),
         torch.linspace(-1, 1, W),
         indexing='ij'
     )
 
-    # 形状: [D, H, W] -> [1, D, H, W, 3] -> [N, D, H, W, 3]
-    identity_grid = torch.stack((grid_w, grid_h, grid_d), dim=3).unsqueeze(0).to(device)
-    identity_grid = identity_grid.repeat(N, 1, 1, 1, 1)
+    # 形状: [H, W] -> [1, H, W, 2] -> [N, H, W, 2]
+    identity_grid = torch.stack((grid_w, grid_h), dim=2).unsqueeze(0).to(device)
+    identity_grid = identity_grid.repeat(N, 1, 1, 1)
 
-    # F.grid_sample 需要 flow_field 的尺寸与输入图像匹配
-    velocity_prev_hr = F.interpolate(velocity_previous, size=(D, H, W), mode='trilinear', align_corners=False)
-    velocity_next_hr = F.interpolate(velocity_next, size=(D, H, W), mode='trilinear', align_corners=False)
+    # 将速度场调整为网格格式
+    # velocity: (N, 2, H, W) -> (N, H, W, 2)
+    flow_prev = identity_grid + velocity_previous.permute(0, 2, 3, 1)
+    flow_next = identity_grid - velocity_next.permute(0, 2, 3, 1)
 
-    # 调整速度场维度以匹配 grid 的 [N, D, H, W, 3] 格式
-    # torch.cat([vx, vy, vz]) -> (N, 3, D, H, W) -> permute -> (N, D, H, W, 3)
-    # 注意：grid_sample 的 flow field 坐标顺序是 (w, h, d)
-    flow_prev = identity_grid + velocity_prev_hr.permute(0, 2, 3, 4, 1)
-    flow_next = identity_grid - velocity_next_hr.permute(0, 2, 3, 4, 1)
-
+    # 使用grid_sample进行图像变形
     warped_frame_prev = F.grid_sample(frame_previous, flow_prev, mode='bilinear', padding_mode='border', align_corners=False)
     warped_frame_next = F.grid_sample(frame_next, flow_next, mode='bilinear', padding_mode='border', align_corners=False)
 
@@ -167,42 +155,32 @@ class DiscriminatorT(nn.Module):
     def __init__(self, in_channels=1):
         super(DiscriminatorT,self).__init__()
 
-        input_channels = in_channels * 3
+        input_channels = in_channels * 3  # 三帧图像拼接
 
         self.features = nn.Sequential(
-            
-            nn.Conv3d(input_channels, 32, kernel_size=4, stride=2, padding=1),
+            nn.Conv2d(input_channels, 32, kernel_size=4, stride=2, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
 
-            nn.Conv3d(32, 64, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm3d(64),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(64),
             nn.LeakyReLU(0.2, inplace=True),
 
-            nn.Conv3d(64, 128, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm3d(128),
+            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2, inplace=True),
 
-            nn.Conv3d(128, 256, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm3d(256),
+            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
         )
         
-        """
         self.classifier = nn.Sequential(
-            nn.Linear(256 * 4 * 4 * 4, 1024),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(1024, 1),
-            nn.Sigmoid()
-        )
-        """
-
-        self.classifier = nn.Sequential(
-            nn.Linear(256 * 4 * 4 * 4, 1),
+            nn.Linear(256 * 4 * 4, 1),
             nn.Sigmoid()
         )
     
     def forward(self, frame_sequence):
-        # 这里的输入 frame_sequence 应该是已经拼接好的三帧数据
+        # 输入 frame_sequence: (N, C*3, H, W) - 三帧图像拼接
         features = self.features(frame_sequence)
         features_flat = torch.flatten(features, 1)
         validity = self.classifier(features_flat)

@@ -1,0 +1,30 @@
+{
+    "model": {
+        "in_channels": 1,
+        "out_channels": 1,
+        "n_residual_blocks": 8,
+        "upsample_factor": 4,
+        "scale_factor": 4
+    },
+    "training": {
+        "data_root": "./data/digital_typhoon",
+        "batch_size": 16,
+        "patch_size": 64,
+        "sequence_length": 3,
+        "num_workers": 4,
+        "epochs": 100,
+        "lr_g": 0.0001,
+        "lr_d": 0.0001,
+        "beta1": 0.9,
+        "beta2": 0.999,
+        "lambda_content": 1.0,
+        "lambda_adv_s": 0.001,
+        "lambda_adv_t": 0.001,
+        "save_interval": 10,
+        "log_interval": 100,
+        "val_interval": 1000,
+        "checkpoint_dir": "./checkpoints",
+        "log_dir": "./logs"
+    },
+    "device": "cuda"
+}
