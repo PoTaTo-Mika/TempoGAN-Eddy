@@ -1,18 +1,19 @@
-# Dataset for digital typhoon
+# Dataset for digital typhoon H5 files
 import torch
 import torch.nn.functional as F
 import numpy as np
 import os
-from PIL import Image
+import h5py
 from torch.utils.data import Dataset
 import random
-import cv2
 from typing import List, Tuple, Optional
+import glob
 
 class DigitalTyphoonDataset(Dataset):
     """
     Digital Typhoon数据集类，用于超分辨率任务
     支持时序图像处理，可以生成连续三帧用于时间判别器
+    直接从H5文件读取Infrared数据
     """
     
     def __init__(self, 
@@ -26,7 +27,7 @@ class DigitalTyphoonDataset(Dataset):
         初始化数据集
         
         Args:
-            data_root: 数据根目录
+            data_root: 数据根目录 (如 data/WP/image/)
             split: 数据集分割 ('train', 'val', 'test')
             scale_factor: 超分辨率倍数
             patch_size: 训练时的图像块大小
@@ -46,27 +47,39 @@ class DigitalTyphoonDataset(Dataset):
         # 时序分组：将连续的图像分组
         self.sequence_groups = self._group_sequences()
         
-        print(f"Loaded {len(self.data_paths)} images for {split} split")
+        print(f"Loaded {len(self.data_paths)} H5 files for {split} split")
         print(f"Created {len(self.sequence_groups)} sequence groups")
     
     def _load_data_paths(self) -> List[str]:
-        """加载数据路径"""
+        """加载H5文件路径"""
         data_paths = []
         
         # 根据split确定子目录
-        split_dir = os.path.join(self.data_root, self.split)
+        if self.split == 'train':
+            # 训练集：使用大部分月份的数据
+            split_dirs = ['202107', '202108', '202109', '202110', '202111', '202112']
+        elif self.split == 'val':
+            # 验证集：使用部分月份的数据
+            split_dirs = ['202201', '202202']
+        elif self.split == 'test':
+            # 测试集：使用剩余月份的数据
+            split_dirs = ['202203', '202204', '202205']
+        else:
+            raise ValueError(f"Unknown split: {self.split}")
         
-        if not os.path.exists(split_dir):
-            raise ValueError(f"Split directory {split_dir} does not exist")
-        
-        # 遍历所有图像文件
-        for root, dirs, files in os.walk(split_dir):
-            for file in files:
-                if file.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff')):
-                    data_paths.append(os.path.join(root, file))
+        # 遍历指定月份目录下的所有H5文件
+        for month_dir in split_dirs:
+            month_path = os.path.join(self.data_root, month_dir)
+            if os.path.exists(month_path):
+                # 查找该月份下的所有H5文件
+                h5_files = glob.glob(os.path.join(month_path, "*.h5"))
+                data_paths.extend(h5_files)
         
         # 按文件名排序，确保时序一致性
         data_paths.sort()
+        
+        if not data_paths:
+            raise ValueError(f"No H5 files found for split {self.split} in {self.data_root}")
         
         return data_paths
     
@@ -80,26 +93,38 @@ class DigitalTyphoonDataset(Dataset):
         
         return sequence_groups
     
-    def _load_image(self, image_path: str) -> torch.Tensor:
-        """加载单张图像"""
+    def _load_h5_data(self, h5_path: str) -> torch.Tensor:
+        """从H5文件加载Infrared数据"""
         try:
-            # 使用PIL加载图像
-            image = Image.open(image_path).convert('L')  # 转换为灰度图
-            image = np.array(image)
-            
-            # 归一化到[0, 1]
-            if image.max() > 1:
-                image = image.astype(np.float32) / 255.0
-            
-            # 转换为tensor: (H, W) -> (1, H, W)
-            image = torch.from_numpy(image).float().unsqueeze(0)
-            
-            return image
-            
+            with h5py.File(h5_path, 'r') as f:
+                # 读取Infrared数据集
+                if 'Infrared' in f:
+                    data = f['Infrared'][:]
+                else:
+                    # 如果没有Infrared，尝试读取根目录下的第一个数据集
+                    first_key = list(f.keys())[0]
+                    data = f[first_key][:]
+                
+                # 转换为float32
+                data = data.astype(np.float32)
+                
+                # 归一化到[0, 1]范围
+                # 根据log.md中的数据，这是亮度温度数据，单位是K
+                # 假设温度范围在200-300K之间，归一化到[0,1]
+                data_min = np.min(data)
+                data_max = np.max(data)
+                if data_max > data_min:
+                    data = (data - data_min) / (data_max - data_min)
+                
+                # 转换为tensor: (H, W) -> (1, H, W)
+                data = torch.from_numpy(data).float().unsqueeze(0)
+                
+                return data
+                
         except Exception as e:
-            print(f"Error loading image {image_path}: {e}")
+            print(f"Error loading H5 file {h5_path}: {e}")
             # 返回一个默认的黑色图像
-            return torch.zeros(1, 64, 64)
+            return torch.zeros(1, 512, 512)  # 根据log.md中的数据尺寸
     
     def _extract_patch(self, image: torch.Tensor, center_x: int, center_y: int) -> torch.Tensor:
         """从图像中提取指定中心的patch"""
@@ -154,7 +179,7 @@ class DigitalTyphoonDataset(Dataset):
         # 加载时序图像
         sequence_images = []
         for path in sequence_paths:
-            image = self._load_image(path)
+            image = self._load_h5_data(path)
             sequence_images.append(image)
         
         # 选择中间帧作为目标高分辨率图像
@@ -216,7 +241,7 @@ class DigitalTyphoonDataLoader:
         创建训练、验证和测试数据加载器
         
         Args:
-            data_root: 数据根目录
+            data_root: 数据根目录 (如 data/WP/image/)
             batch_size: 批次大小
             scale_factor: 超分辨率倍数
             patch_size: 训练时的图像块大小
@@ -288,7 +313,7 @@ class DigitalTyphoonDataLoader:
 if __name__ == "__main__":
     # 创建数据集
     dataset = DigitalTyphoonDataset(
-        data_root="./data/digital_typhoon",
+        data_root="./data/WP/image",  # 修改为实际的H5文件路径
         split="train",
         scale_factor=4,
         patch_size=64,
@@ -304,7 +329,7 @@ if __name__ == "__main__":
     
     # 创建数据加载器
     train_loader, val_loader, test_loader = DigitalTyphoonDataLoader.create_dataloaders(
-        data_root="./data/digital_typhoon",
+        data_root="./data/WP/image",  # 修改为实际的H5文件路径
         batch_size=8,
         scale_factor=4,
         patch_size=64,

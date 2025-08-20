@@ -7,7 +7,7 @@
         "scale_factor": 4
     },
     "training": {
-        "data_root": "./data/digital_typhoon",
+        "data_root": "./data/WP/image",
         "batch_size": 16,
         "patch_size": 64,
         "sequence_length": 3,
