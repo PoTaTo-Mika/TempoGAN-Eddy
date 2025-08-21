@@ -96,11 +96,12 @@ class DiscriminatorS(nn.Module):
             nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
-            # size: (256, 4, 4)
         )
 
+        # 移除固定的全连接层，使用自适应池化
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.classifier = nn.Sequential(
-            nn.Linear(256 * 4 * 4, 1),
+            nn.Linear(256, 1),
             nn.Sigmoid()
         )
 
@@ -118,6 +119,9 @@ class DiscriminatorS(nn.Module):
                                    dim=1)
         
         features = self.features(combined_input)
+        # 使用自适应池化，确保输出尺寸为 (batch_size, 256, 1, 1)
+        features = self.adaptive_pool(features)
+        # 展平特征: (batch_size, 256, 1, 1) -> (batch_size, 256)
         features = torch.flatten(features, 1)
         validity = self.classifier(features)
 
@@ -174,14 +178,19 @@ class DiscriminatorT(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
         )
         
+        # 移除固定的全连接层，使用自适应池化
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.classifier = nn.Sequential(
-            nn.Linear(256 * 4 * 4, 1),
+            nn.Linear(256, 1),
             nn.Sigmoid()
         )
     
     def forward(self, frame_sequence):
         # 输入 frame_sequence: (N, C*3, H, W) - 三帧图像拼接
         features = self.features(frame_sequence)
+        # 使用自适应池化，确保输出尺寸为 (batch_size, 256, 1, 1)
+        features = self.adaptive_pool(features)
+        # 展平特征: (batch_size, 256, 1, 1) -> (batch_size, 256)
         features_flat = torch.flatten(features, 1)
         validity = self.classifier(features_flat)
         return validity

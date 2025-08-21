@@ -140,11 +140,25 @@ class DigitalTyphoonDataset(Dataset):
         # 提取patch
         patch = image[..., start_y:end_y, start_x:end_x]
         
+        # 计算需要的padding
+        current_h, current_w = patch.shape[-2:]
+        pad_h = max(0, self.patch_size - current_h)
+        pad_w = max(0, self.patch_size - current_w)
+        
         # 如果patch大小不足，进行padding
-        if patch.shape[-2] < self.patch_size or patch.shape[-1] < self.patch_size:
-            pad_h = max(0, self.patch_size - patch.shape[-2])
-            pad_w = max(0, self.patch_size - patch.shape[-1])
-            patch = F.pad(patch, (0, pad_w, 0, pad_h), mode='reflect')
+        if pad_h > 0 or pad_w > 0:
+            # 确保patch不为空再进行padding
+            if patch.numel() > 0:
+                # 使用reflect模式进行padding，如果失败则使用zeros模式
+                try:
+                    patch = F.pad(patch, (0, pad_w, 0, pad_h), mode='reflect')
+                except RuntimeError:
+                    # 如果reflect模式失败，使用zeros模式
+                    patch = F.pad(patch, (0, pad_w, 0, pad_h), mode='constant', value=0)
+            else:
+                # 如果patch为空，创建一个全零patch
+                patch = torch.zeros(image.shape[0], self.patch_size, self.patch_size, 
+                                  dtype=image.dtype, device=image.device)
         
         return patch
     
@@ -187,6 +201,7 @@ class DigitalTyphoonDataset(Dataset):
         target_hr = sequence_images[target_idx]
         
         # 生成低分辨率图像（通过下采样）
+        # 注意：这里应该先提取patch，再下采样，而不是先下采样再提取patch
         target_lr = F.interpolate(
             target_hr.unsqueeze(0), 
             scale_factor=1/self.scale_factor, 
@@ -202,12 +217,30 @@ class DigitalTyphoonDataset(Dataset):
         
         # 随机选择patch位置
         H, W = target_hr.shape[-2:]
-        center_x = random.randint(self.patch_size//2, W - self.patch_size//2)
-        center_y = random.randint(self.patch_size//2, H - self.patch_size//2)
+        # 确保选择的中心点能够提取到完整的patch
+        min_center_x = max(self.patch_size//2, 0)
+        max_center_x = min(W - self.patch_size//2, W)
+        min_center_y = max(self.patch_size//2, 0)
+        max_center_y = min(H - self.patch_size//2, H)
         
-        # 提取patch
+        # 如果图像太小，无法提取patch，则使用图像中心
+        if max_center_x <= min_center_x or max_center_y <= min_center_y:
+            center_x = W // 2
+            center_y = H // 2
+        else:
+            center_x = random.randint(min_center_x, max_center_x)
+            center_y = random.randint(min_center_y, max_center_y)
+        
+        # 提取patch - 修复：先提取高分辨率patch，再生成对应的低分辨率patch
         hr_patch = self._extract_patch(target_hr, center_x, center_y)
-        lr_patch = self._extract_patch(target_lr, center_x, center_y)
+        
+        # 从高分辨率patch生成低分辨率patch
+        lr_patch = F.interpolate(
+            hr_patch.unsqueeze(0), 
+            scale_factor=1/self.scale_factor, 
+            mode='bilinear', 
+            align_corners=False
+        ).squeeze(0)
         
         # 提取时序patch
         sequence_patches = []
@@ -219,7 +252,7 @@ class DigitalTyphoonDataset(Dataset):
         sequence_combined = torch.cat(sequence_patches, dim=0)
         
         return {
-            'lr': lr_patch,                    # 低分辨率patch: (1, H, W)
+            'lr': lr_patch,                    # 低分辨率patch: (1, H/4, W/4)
             'hr': hr_patch,                    # 高分辨率patch: (1, H, W)
             'sequence': sequence_combined,      # 时序序列: (3, H, W)
             'sequence_paths': sequence_paths,   # 图像路径（用于调试）
@@ -313,7 +346,7 @@ class DigitalTyphoonDataLoader:
 if __name__ == "__main__":
     # 创建数据集
     dataset = DigitalTyphoonDataset(
-        data_root="./data/WP/image",  # 修改为实际的H5文件路径
+        data_root="../data/WP/image",  # 修改为实际的H5文件路径
         split="train",
         scale_factor=4,
         patch_size=64,
@@ -329,7 +362,7 @@ if __name__ == "__main__":
     
     # 创建数据加载器
     train_loader, val_loader, test_loader = DigitalTyphoonDataLoader.create_dataloaders(
-        data_root="./data/WP/image",  # 修改为实际的H5文件路径
+        data_root="../data/WP/image",  # 修改为实际的H5文件路径
         batch_size=8,
         scale_factor=4,
         patch_size=64,
