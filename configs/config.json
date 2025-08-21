@@ -12,6 +12,7 @@
         "patch_size": 128,
         "sequence_length": 3,
         "num_workers": 4,
+        "num_typhoons": 100,
         "epochs": 100,
         "lr_g": 0.0001,
         "lr_d": 0.0001,

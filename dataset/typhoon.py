@@ -22,7 +22,8 @@ class DigitalTyphoonDataset(Dataset):
                  scale_factor: int = 4,
                  patch_size: int = 64,
                  sequence_length: int = 3,
-                 augment: bool = True):
+                 augment: bool = True,
+                 num_typhoons: int = 100):  # 新增：指定台风数量
         """
         初始化数据集
         
@@ -33,6 +34,7 @@ class DigitalTyphoonDataset(Dataset):
             patch_size: 训练时的图像块大小
             sequence_length: 时序序列长度（用于时间判别器）
             augment: 是否使用数据增强
+            num_typhoons: 指定使用的台风数量
         """
         self.data_root = data_root
         self.split = split
@@ -40,6 +42,7 @@ class DigitalTyphoonDataset(Dataset):
         self.patch_size = patch_size
         self.sequence_length = sequence_length
         self.augment = augment
+        self.num_typhoons = num_typhoons
         
         # 数据路径列表
         self.data_paths = self._load_data_paths()
@@ -51,32 +54,53 @@ class DigitalTyphoonDataset(Dataset):
         print(f"Created {len(self.sequence_groups)} sequence groups")
     
     def _load_data_paths(self) -> List[str]:
-        """加载H5文件路径"""
+        """加载H5文件路径 - 改进策略：按台风编号随机选择"""
         data_paths = []
         
-        # 根据split确定子目录
+        # 获取所有台风编号目录
+        typhoon_dirs = []
+        for item in os.listdir(self.data_root):
+            item_path = os.path.join(self.data_root, item)
+            if os.path.isdir(item_path) and item.startswith('20'):
+                typhoon_dirs.append(item)
+        
+        # 按台风编号排序
+        typhoon_dirs.sort()
+        
+        # 根据split确定使用的台风数量
         if self.split == 'train':
-            # 训练集：使用大部分月份的数据
-            split_dirs = ['202107', '202108', '202109', '202110', '202111', '202112']
+            # 训练集：使用大部分台风
+            num_use = int(self.num_typhoons * 0.7)
+            start_idx = 0
         elif self.split == 'val':
-            # 验证集：使用部分月份的数据
-            split_dirs = ['202201', '202202']
+            # 验证集：使用部分台风
+            num_use = int(self.num_typhoons * 0.15)
+            start_idx = int(self.num_typhoons * 0.7)
         elif self.split == 'test':
-            # 测试集：使用剩余月份的数据
-            split_dirs = ['202203', '202204', '202205']
+            # 测试集：使用剩余台风
+            num_use = int(self.num_typhoons * 0.15)
+            start_idx = int(self.num_typhoons * 0.85)
         else:
             raise ValueError(f"Unknown split: {self.split}")
         
-        # 遍历指定月份目录下的所有H5文件
-        for month_dir in split_dirs:
-            month_path = os.path.join(self.data_root, month_dir)
-            if os.path.exists(month_path):
-                # 查找该月份下的所有H5文件
-                h5_files = glob.glob(os.path.join(month_path, "*.h5"))
-                data_paths.extend(h5_files)
+        # 确保不超出范围
+        if start_idx + num_use > len(typhoon_dirs):
+            num_use = len(typhoon_dirs) - start_idx
         
-        # 按文件名排序，确保时序一致性
-        data_paths.sort()
+        # 选择指定范围的台风目录
+        selected_typhoons = typhoon_dirs[start_idx:start_idx + num_use]
+        
+        print(f"Split {self.split}: Using {len(selected_typhoons)} typhoons from {start_idx} to {start_idx + num_use}")
+        
+        # 遍历选中的台风目录下的所有H5文件
+        for typhoon_dir in selected_typhoons:
+            typhoon_path = os.path.join(self.data_root, typhoon_dir)
+            if os.path.exists(typhoon_path):
+                # 查找该台风下的所有H5文件
+                h5_files = glob.glob(os.path.join(typhoon_path, "*.h5"))
+                # 按文件名排序，确保时序一致性
+                h5_files.sort()
+                data_paths.extend(h5_files)
         
         if not data_paths:
             raise ValueError(f"No H5 files found for split {self.split} in {self.data_root}")
@@ -84,12 +108,27 @@ class DigitalTyphoonDataset(Dataset):
         return data_paths
     
     def _group_sequences(self) -> List[List[str]]:
-        """将连续的图像分组为时序序列"""
+        """将连续的图像分组为时序序列 - 修复：确保同一台风内的连续性"""
         sequence_groups = []
         
-        for i in range(len(self.data_paths) - self.sequence_length + 1):
-            sequence = self.data_paths[i:i + self.sequence_length]
-            sequence_groups.append(sequence)
+        # 按台风目录分组
+        typhoon_groups = {}
+        for path in self.data_paths:
+            # 从路径中提取台风编号
+            typhoon_id = os.path.basename(os.path.dirname(path))
+            if typhoon_id not in typhoon_groups:
+                typhoon_groups[typhoon_id] = []
+            typhoon_groups[typhoon_id].append(path)
+        
+        # 为每个台风创建时序序列
+        for typhoon_id, paths in typhoon_groups.items():
+            # 确保路径按时间排序
+            paths.sort()
+            
+            # 创建时序序列组
+            for i in range(len(paths) - self.sequence_length + 1):
+                sequence = paths[i:i + self.sequence_length]
+                sequence_groups.append(sequence)
         
         return sequence_groups
     
@@ -187,7 +226,7 @@ class DigitalTyphoonDataset(Dataset):
         return len(self.sequence_groups)
     
     def __getitem__(self, idx: int) -> dict:
-        """获取一个数据样本"""
+        """获取一个数据样本 - 修复：确保三帧是不同的图像"""
         sequence_paths = self.sequence_groups[idx]
         
         # 加载时序图像
@@ -242,7 +281,7 @@ class DigitalTyphoonDataset(Dataset):
             align_corners=False
         ).squeeze(0)
         
-        # 提取时序patch
+        # 提取时序patch - 修复：确保三帧是不同的patch
         sequence_patches = []
         for img in sequence_images:
             patch = self._extract_patch(img, center_x, center_y)
@@ -256,7 +295,13 @@ class DigitalTyphoonDataset(Dataset):
             'hr': hr_patch,                    # 高分辨率patch: (1, H, W)
             'sequence': sequence_combined,      # 时序序列: (3, H, W)
             'sequence_paths': sequence_paths,   # 图像路径（用于调试）
-            'patch_center': (center_x, center_y)  # patch中心位置
+            'patch_center': (center_x, center_y),  # patch中心位置
+            'lr_sequence': [F.interpolate(
+                patch.unsqueeze(0), 
+                scale_factor=1/self.scale_factor, 
+                mode='bilinear', 
+                align_corners=False
+            ).squeeze(0) for patch in sequence_patches]  # 新增：三帧低分辨率图像
         }
 
 class DigitalTyphoonDataLoader:
@@ -269,7 +314,8 @@ class DigitalTyphoonDataLoader:
                           patch_size: int = 64,
                           sequence_length: int = 3,
                           num_workers: int = 4,
-                          augment: bool = True):
+                          augment: bool = True,
+                          num_typhoons: int = 100):  # 新增：指定台风数量
         """
         创建训练、验证和测试数据加载器
         
@@ -281,6 +327,7 @@ class DigitalTyphoonDataLoader:
             sequence_length: 时序序列长度
             num_workers: 数据加载的工作进程数
             augment: 是否使用数据增强
+            num_typhoons: 指定使用的台风数量
         """
         from torch.utils.data import DataLoader
         
@@ -291,7 +338,8 @@ class DigitalTyphoonDataLoader:
             scale_factor=scale_factor,
             patch_size=patch_size,
             sequence_length=sequence_length,
-            augment=augment
+            augment=augment,
+            num_typhoons=num_typhoons
         )
         
         val_dataset = DigitalTyphoonDataset(
@@ -300,7 +348,8 @@ class DigitalTyphoonDataLoader:
             scale_factor=scale_factor,
             patch_size=patch_size,
             sequence_length=sequence_length,
-            augment=False  # 验证时不使用数据增强
+            augment=False,  # 验证时不使用数据增强
+            num_typhoons=num_typhoons
         )
         
         test_dataset = DigitalTyphoonDataset(
@@ -309,7 +358,8 @@ class DigitalTyphoonDataLoader:
             scale_factor=scale_factor,
             patch_size=patch_size,
             sequence_length=sequence_length,
-            augment=False  # 测试时不使用数据增强
+            augment=False,  # 测试时不使用数据增强
+            num_typhoons=num_typhoons
         )
         
         # 创建数据加载器

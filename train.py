@@ -153,7 +153,8 @@ class TempoGANTrainer:
             patch_size=training_config['patch_size'],
             sequence_length=training_config['sequence_length'],
             num_workers=training_config['num_workers'],
-            augment=True
+            augment=True,
+            num_typhoons=training_config.get('num_typhoons', 100)  # 新增：指定台风数量
         )
         
         self.logger.info(f"数据加载器初始化完成")
@@ -164,19 +165,14 @@ class TempoGANTrainer:
     def _train_discriminators(self, batch_data):
         """训练判别器"""
         # 准备数据
-        lr_images = batch_data['lr'].to(self.device)  # (B, 1, H, W)
-        hr_images = batch_data['hr'].to(self.device)  # (B, 1, H, W)
-        sequence_images = batch_data['sequence'].to(self.device)  # (B, 3, H, W)
+        lr_images = batch_data['lr'].to(self.device)
+        hr_images = batch_data['hr'].to(self.device)
+        sequence_images = batch_data['sequence'].to(self.device)
+        lr_sequence = batch_data['lr_sequence']  # 新增：三帧低分辨率图像
         
         batch_size = lr_images.size(0)
-        
-        # 创建真实和虚假标签
         real_labels = torch.ones(batch_size, 1).to(self.device)
         fake_labels = torch.zeros(batch_size, 1).to(self.device)
-        
-        # 生成假图像（不计算梯度）
-        with torch.no_grad():
-            sr_images = self.generator(lr_images)
         
         # 训练空间判别器
         self.optimizer_d.zero_grad()
@@ -186,6 +182,9 @@ class TempoGANTrainer:
         d_real_loss_s = self.adversarial_criterion(real_validity_s, real_labels)
         
         # 假图像的判别结果
+        with torch.no_grad():
+            sr_images = self.generator(lr_images)
+        
         fake_validity_s = self.discriminator_s(sr_images.detach(), lr_images)
         d_fake_loss_s = self.adversarial_criterion(fake_validity_s, fake_labels)
         
@@ -197,16 +196,12 @@ class TempoGANTrainer:
         real_validity_t = self.discriminator_t(sequence_images)
         d_real_loss_t = self.adversarial_criterion(real_validity_t, real_labels)
         
-        # 假序列的判别结果（需要重新生成三帧）
+        # 假序列的判别结果（修复：使用正确的三帧低分辨率图像）
         with torch.no_grad():
-            # 从sequence中提取三帧对应的低分辨率图像
-            lr_prev = lr_images  # 简化处理，实际应该有三帧
-            lr_curr = lr_images
-            lr_next = lr_images
-            
-            sr_prev = self.generator(lr_prev)
-            sr_curr = self.generator(lr_curr)
-            sr_next = self.generator(lr_next)
+            # 使用三帧不同的低分辨率图像生成对应的超分辨率图像
+            sr_prev = self.generator(lr_sequence[0].to(self.device))
+            sr_curr = self.generator(lr_sequence[1].to(self.device))
+            sr_next = self.generator(lr_sequence[2].to(self.device))
             
             # 拼接三帧假图像
             fake_sequence = torch.cat([sr_prev, sr_curr, sr_next], dim=1)
@@ -236,6 +231,7 @@ class TempoGANTrainer:
         lr_images = batch_data['lr'].to(self.device)
         hr_images = batch_data['hr'].to(self.device)
         sequence_images = batch_data['sequence'].to(self.device)
+        lr_sequence = batch_data['lr_sequence']  # 新增：三帧低分辨率图像
         
         batch_size = lr_images.size(0)
         real_labels = torch.ones(batch_size, 1).to(self.device)
@@ -253,15 +249,11 @@ class TempoGANTrainer:
         fake_validity_s = self.discriminator_s(sr_images, lr_images)
         adversarial_loss_s = self.adversarial_criterion(fake_validity_s, real_labels)
         
-        # 3. 对抗性损失 - 来自时间判别器
+        # 3. 对抗性损失 - 来自时间判别器（修复：使用正确的三帧低分辨率图像）
         # 生成三帧假图像
-        lr_prev = lr_images  # 简化处理
-        lr_curr = lr_images
-        lr_next = lr_images
-        
-        sr_prev = self.generator(lr_prev)
-        sr_curr = self.generator(lr_curr)
-        sr_next = self.generator(lr_next)
+        sr_prev = self.generator(lr_sequence[0].to(self.device))
+        sr_curr = self.generator(lr_sequence[1].to(self.device))
+        sr_next = self.generator(lr_sequence[2].to(self.device))
         
         fake_sequence = torch.cat([sr_prev, sr_curr, sr_next], dim=1)
         fake_validity_t = self.discriminator_t(fake_sequence)
